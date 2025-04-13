@@ -1,52 +1,49 @@
 """
 dataset.py
 
-This script load the dataset, generate masks, and load masks.
+This script load the dataset
 """
 import torch
 import numpy as np
-def bbox2mask(img_shape, bbox, dtype='uint8'):
-    """Generate mask in ndarray from bbox.
+import cv2
 
-    The returned mask has the shape of (h, w, 1). '1' indicates the
-    hole and '0' indicates the valid regions.
-
-    We prefer to use `uint8` as the data type of masks, which may be different
-    from other codes in the community.
-
-    Args:
-        img_shape (tuple[int]): The size of the image.
-        bbox (tuple[int]): Configuration tuple, (top, left, height, width)
-        dtype (str): Indicate the data type of returned masks. Default: 'uint8'
-
-    Return:
-        numpy.ndarray: Mask in the shape of (h, w, 1).
+def load_image(img_path: str, transform = None) -> torch.Tensor:
     """
+    Load an image from a file path and apply optional transformations.
+    params:
+        img_path: path to the image file
+        transform: optional transformation to apply to the image
+    returns:
+        img_tensor: torch.Tensor, shape (3, H, W), normalized to [0, 1]
+    """
+    # (H, W, 3) - BGR
+    img = cv2.imread(img_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = np.transpose(img, (2, 0, 1))  # (3, H, W)
+    img = np.float32(img/ 255.0) # normalize [0,1]
 
-    height, width = img_shape[:2]
+    img_tensor = torch.tensor(img, dtype=torch.float32)
+    if transform:
+        img_tensor = transform(img_tensor)
+    return img_tensor
 
-    mask = np.zeros((height, width, 1), dtype=dtype)
-    mask[bbox[0]:bbox[0] + bbox[2], bbox[1]:bbox[1] + bbox[3], :] = 1
+def addnoise(img_train: torch.Tensor, noiseL: float, device: torch.device) -> torch.Tensor:
+    """
+    Add random level of gaussian noise.
+    params:
+        img_train: image to add noise
+        noiseL: the noise level
+        device: the device to use (CPU or GPU)
+    returns:
+        image after adding noise
+    """
+    B, C, H, W = img_train.shape
+    noise = torch.zeros((B, C, H, W), dtype=torch.float32)
 
-    return mask
+    for i in range(B):
+        noise[i] = torch.randn((C, H, W)) * (noiseL / 255.0)  # scale std to [0,1] domain
 
-def get_center_mask(image_size):
-    h, w = image_size
-    mask = bbox2mask(image_size, (h//4, w//4, h//2, w//2))
-    return torch.from_numpy(mask).permute(2,0,1)
+    noisy_imgs = img_train + noise.to(device)
+    noisy_imgs = torch.clamp(noisy_imgs, 0.0, 1.0)  # Keep in valid image range
 
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    # 示例图像尺寸（假设是 RGB 图像）
-    img_shape = (256, 256, 3)
-
-    # 定义一个边界框：(top, left, height, width)
-    bbox = (100, 50, 60, 80)  # 表示从 (100, 50) 开始，高 60 宽 80 的区域
-
-    # 生成 mask
-    mask = bbox2mask(img_shape, bbox)
-
-    # 可视化 mask
-    plt.imshow(mask.squeeze(), cmap='gray')  # squeeze 去掉最后一个维度
-    plt.title("Mask from bbox")
-    plt.show()
+    return noisy_imgs

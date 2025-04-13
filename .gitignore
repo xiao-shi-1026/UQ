@@ -1,1 +1,3 @@
-# Dataset artifacts
+# models
+models/pretrained/*.pth
+data/masks/*.npz
