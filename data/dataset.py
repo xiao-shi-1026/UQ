@@ -37,11 +37,10 @@ def addnoise(img_train: torch.Tensor, noiseL: float, device: torch.device) -> to
     returns:
         image after adding noise
     """
-    B, C, H, W = img_train.shape
-    noise = torch.zeros((B, C, H, W), dtype=torch.float32)
+    C, H, W = img_train.shape
+    noise = torch.zeros((C, H, W), dtype=torch.float32)
 
-    for i in range(B):
-        noise[i] = torch.randn((C, H, W)) * (noiseL / 255.0)  # scale std to [0,1] domain
+    noise = torch.randn((C, H, W)) * (noiseL / 255.0)  # scale std to [0,1] domain
 
     noisy_imgs = img_train + noise.to(device)
     noisy_imgs = torch.clamp(noisy_imgs, 0.0, 1.0)  # Keep in valid image range

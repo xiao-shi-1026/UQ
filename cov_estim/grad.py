@@ -11,30 +11,30 @@ from numpy.linalg import lstsq
 def forward_direction(model: torch.nn.Module,
                       masked_image: torch.Tensor,
                       H: torch.Tensor,
-                      eigvecs: torch.Tensor, 
+                      vecs: torch.Tensor, 
                       amount: float = 0.01) -> torch.Tensor:
     """
     Forward u(y + ε * perturbation), where perturbation is masked eigvecs.
 
-    Args:
+    params:
         model: torch.nn.Module, inpainting model
         masked_image: [3, H, W], corrupted image
         H: [1, H, W] or [3, H, W], binary mask (1 = masked)
         eigvecs: [n_ev, 3, H, W] or [3, H, W], directional perturbation
         amount: float, perturbation scale
 
-    Returns:
+    returns:
         output: [n_ev, 3, H, W]
     """
-    if eigvecs.dim() == 3:
-        eigvecs = eigvecs.unsqueeze(0)  # → [1, 3, H, W]
+    if vecs.dim() == 3:
+        vecs = vecs.unsqueeze(0)  # → [1, 3, H, W]
 
-    n_ev = eigvecs.shape[0]
+    n_ev = vecs.shape[0]
 
     perturbed_inputs = []
     for i in range(n_ev):
         # Use your masking expression
-        perturbed = masked_image + m.apply_mask(amount * eigvecs[i], H)  # [3, H, W]
+        perturbed = masked_image + amount * m.apply_mask(vecs[i], H)  # [3, H, W]
         perturbed_inputs.append(perturbed)
 
     input_batch = torch.stack(perturbed_inputs)  # [n_ev, 3, H, W]
@@ -44,93 +44,64 @@ def forward_direction(model: torch.nn.Module,
 
     return output
 
-    
-def power_iteration(model: torch.nn.Module,
-                    n_ev: int,
-                    image: torch.Tensor,
-                    mask: torch.Tensor,
-                    mmse: torch.Tensor,
-                    eigvecs: torch.Tensor,
-                    num_iter: int = 10,
-                    tol: float = 1e-6,
-                    verbose: bool = False):
+def random_direction(
+    n_v: int,
+    shape: torch.Size,
+    device: torch.device = 'cpu',
+    dtype=torch.float32) -> torch.Tensor:
     """
-    Perform full power iteration to estimate dominant eigenvectors of the Jacobian covariance.
+    Initialize n_v orthonormal random direction vectors with the given shape.
 
-    Args:
-        model: torch.nn.Module, the model used for inference
-        n_ev: int, number of eigenvectors to estimate
-        image: torch.Tensor, shape (3, H, W), masked input image
-        mask: torch.Tensor, shape (1, H, W) or (3, H, W), binary mask (1 = masked, 0 = observed)
-        mmse: torch.Tensor, model output at original masked image, shape (3, H, W)
-        eigvecs: torch.Tensor, shape (n_ev, 3, H, W), initial eigenvector directions
-        num_iter: int, number of iterations
-        tol: float, stopping tolerance based on cosine similarity
-        verbose: bool, whether to print convergence info
+    params:
+        n_v (int): Number of orthonormal directions to generate.
+        shape (torch.Size): Shape of each direction, e.g., (3, 256, 256).
+        device (torch.device): Device to place the directions on.
+        dtype (torch.dtype): Data type of the directions.
 
-    Returns:
-        eigvecs: torch.Tensor, estimated eigenvectors
-        eigvals: torch.Tensor, estimated eigenvalues
+    returns:
+        torch.Tensor: Tensor of shape [n_v, *shape], containing orthonormal direction vectors.
     """
-    prev_eigvecs = eigvecs.clone()
+    D = torch.tensor(shape).prod().item()  # total number of elements
+    mat = torch.randn(D, n_v, device=device, dtype=dtype)  # [D, n_v]
 
-    for it in range(num_iter):
-        with torch.no_grad():
-            increment = forward_direction(model, image, mask, eigvecs, 0)
-            Ab = increment - mmse.unsqueeze(0)  # match shape [n_ev, 3, H, W]
+    # QR decomposition to orthonormalize
+    Q, _ = torch.linalg.qr(mat, mode='reduced')  # Q: [D, n_v]
 
-            # Normalize each direction
-            norm_of_Ab = Ab.view(n_ev, -1).norm(dim=1)
-            eigvecs = Ab / norm_of_Ab.view(n_ev, 1, 1, 1)
+    # Reshape each column back to shape
+    directions = Q.T.reshape(n_v, *shape)  # [n_v, 3, H, W]
 
-            # Orthonormalize
-            Q, _ = torch.linalg.qr(eigvecs.permute(1,2,3,0).reshape(-1, n_ev), mode='reduced')
-            Q = Q / Q.norm(dim=0)
-            eigvecs = Q.T.reshape(eigvecs.shape)
+    # Normalize each direction to unit norm
+    directions = directions / directions.view(n_v, -1).norm(dim=1).view(n_v, 1, 1, 1)
 
-        # Convergence check (cosine similarity)
-        cos_sim = torch.sum(prev_eigvecs * eigvecs) / (prev_eigvecs.norm() * eigvecs.norm())
-        if verbose:
-            print(f"Iter {it+1}: cosine similarity = {cos_sim.item():.6f}")
+    return directions
 
-        if abs(1.0 - cos_sim.item()) < tol:
-            if verbose:
-                print("Converged.")
-            break
-
-        prev_eigvecs = eigvecs.clone()
-
-    eigvals = norm_of_Ab**2  # approximate eigenvalues = ||Jv||^2
-    return eigvecs, eigvals
-
-
-
-def compute_pinv_list(H_list: list[torch.Tensor]) -> list[torch.Tensor]:
+def directional_cov(
+    model: torch.nn.Module,
+    masked_image: torch.Tensor,
+    mmse: torch.Tensor,
+    H: torch.Tensor,
+    directions: torch.Tensor, 
+    amount: float = 1) -> torch.Tensor:
     """
-    Compute the pseudo-inverse of each H_b^T in a list of dense observation matrices.
+    Estimate covariance projections along multiple directions using forward_direction batch evaluation.
 
-    Args:
-        H_list: list of torch.Tensor, each of shape [3K_b, 3HW]
+    params:
+        model (torch.nn.Module): Inpainting/denoising model.
+        masked_image (torch.Tensor): Masked input image (i.e. y), shape [3, H, W].
+        mmse (torch.Tensor): Model output at original masked image, shape [3, H, W].
+        H (torch.Tensor): Binary mask, shape [1, H, W] or [3, H, W], where 1 = masked.
+        directions (torch.Tensor): Direction vectors [n_v, 3, H, W], assumed normalized.
+        forward_direction_fn: A callable like `forward_direction(model, y, H, v, eps)` → model output
+        amount (float): Perturbation amount ε.
 
-    Returns:
-        Ht_pinv_list: list of torch.Tensor, each of shape [3HW, 3K_b]
+    returns:
+        torch.Tensor: Projected variances λ_j for each direction, shape [n_v]
     """
-    Ht_pinv_list = [torch.linalg.pinv(H.T) for H in H_list]
-    return Ht_pinv_list
+    # Get perturbed predictions
+    perturbed_outputs = forward_direction(model, masked_image, H, directions, amount)  # [n_v, 3, H, W]
 
-def init_eigvecs(n_ev: int, shape: tuple, device: torch.device, scale: float = 1e-3) -> torch.Tensor:
-    """
-    Initialize n_ev random eigenvectors.
+    # Compute squared distances per direction
+    deltas = perturbed_outputs - mmse.unsqueeze(0)  # [n_v, 3, H, W]
+    lambda_projections = deltas.pow(2).flatten(1).sum(dim=1) / (amount ** 2)  # [n_v]
 
-    Args:
-        n_ev: number of directions
-        shape: image shape (C, H, W)
-        device: torch.device
-        scale: small factor to keep linear approximation
-
-    Returns:
-        eigvecs: torch.Tensor of shape [n_ev, C, H, W]
-    """
-    eigvecs = torch.randn((n_ev, *shape), device=device)
-    eigvecs = eigvecs / eigvecs.flatten(1).norm(dim=1, keepdim=True).view(n_ev, *[1]*len(shape))
-    return eigvecs * scale
+    return lambda_projections.detach()
