@@ -12,12 +12,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 img = dataset.load_image("data/image/00302.png")
 
-measurement_number = 1
+measurement_number = 100
 n_v = 1
 shape = tuple(img.shape)
 img = img.to(device)  # shape [3, H, W]
 
-mask = m.load_freeform_masks("data/masks", "freeform1020", measurement_number)
+mask = m.generate_mask(measurement_number,(shape[1], shape[2]))
 
 mask = mask.to(device)
 lambda_accum = torch.zeros(n_v, device=device)
@@ -26,8 +26,8 @@ for i in tqdm(range(measurement_number)):
     rd = grad.random_direction(n_v, shape, device)
     mask_i = mask[i]  # shape [3, H, W]
     masked_img = m.apply_mask(img, mask_i)  # [3, H, W]
-    masked_img = dataset.addnoise(masked_img, 5, device)  # [3, H, W]
-    model = utils.load_model(UNet, "models/pretrained/inpainting_unet.pth")
+    # masked_img = dataset.addnoise(masked_img, 5, device)  # [3, H, W]
+    model = utils.load_model(UNet, "models/pretrained/random_inpainting_unet.pth")
     model = model.to(device)
     mmse = model(masked_img.unsqueeze(0))  # [1, 3, H, W]
     mmse = mmse.squeeze(0)  # [3, H, W]
@@ -62,3 +62,21 @@ for i in range(rd.shape[0]):
 
     plt.tight_layout()
     plt.show()
+
+def show_noi(img_tensor, title='Image'):
+    # img_tensor: [C, H, W] in [0, 1]
+    img_np = img_tensor.detach().cpu().numpy()
+    img_np = img_np.transpose(1, 2, 0)  # To HWC
+
+    plt.imshow(img_np)
+    plt.title(title)
+    plt.axis("off")
+
+v_scaled_enhanced = v_scaled.clamp(0, 1)
+
+gamma = 0.3
+v_scaled_enhanced = v_scaled_enhanced ** gamma
+
+plt.figure(figsize=(10, 3))
+show_noi(v_scaled_enhanced, title='v_scaled (gamma enhanced)')
+plt.show()
